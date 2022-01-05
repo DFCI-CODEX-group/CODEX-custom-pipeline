@@ -26,4 +26,5 @@ This pipeline then performs cell segmentation, quantifies the marker levels for 
 
 - In the video, Jasper gives step-by-step instructions for running the pipeline
 
-* need to give credit to segmentation devs: https://github.com/spreka/biomagdsb
+
+TODO: need to give credit to segmentation devs: https://github.com/spreka/biomagdsb
