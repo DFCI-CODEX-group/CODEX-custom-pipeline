@@ -1,18 +1,21 @@
-# Jacob Rosenthal
-# script for codex workflow based on PathML
-
 import argparse
 import pathlib
 from pathlib import Path
 import time
 from datetime import timedelta
+import json
+import pandas as pd
 
 from pathml.core import CODEXSlide
 from pathml.preprocessing import Pipeline, CollapseRunsCODEX, SegmentMIF, QuantifyMIF
 
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description = 'CODEX analysis pipeline')
-    parser.add_argument('--inputfile', required = True, type = pathlib.Path, help = 'path to input tiff file')
+    parser.add_argument('--input-image', required = True, type = pathlib.Path, dest = "inputfile",
+                        help = 'path to input tiff file')
+    parser.add_argument('--metadata', required = True, type = pathlib.Path,
+                        help = 'path to experiment metadata (`experiment.json`)')
     parser.add_argument('--nucleus_marker_cycle_index', required = True, type = int, dest = "nuc_cyc_ix",
                         help = 'cycle index for nucleus marker (0 indexed)')
     parser.add_argument('--nucleus_marker_channel_index', required = True, type = int, dest = "nuc_chan_ix",
@@ -21,21 +24,51 @@ if __name__ == '__main__':
                         help = 'cycle index for cytoplasm marker (0 indexed)')
     parser.add_argument('--cytoplasm_marker_channel_index', required = True, type = int, dest = "cyto_chan_ix",
                         help = 'channel index for cytoplasm marker (0 indexed)')
-
+    parser.add_argument('--tile-size', required = False, default = 1024, type = int, dest = "tile_size",
+                        help = 'tile size')
+    parser.add_argument('--save-anndata', required = False, default = False, type = bool, dest = "save_anndata",
+                        help = 'whether to save counts matrix to disk in AnnData `.h5ad` format')
     args = parser.parse_args()
 
-    # load slide and extract as region
+    # load metadata, get channel names
+    metadata_p = Path(args.metadata)
+    # metadata_p = Path("/Users/jacobrosenthal/data/molecular_imaging_core/Exp. 273 - 111521SM-HNC2/experiment.json")
+
+    if not (metadata_p.is_file() and metadata_p.suffix == ".json"):
+        raise ValueError(f"Input metadata file invalid: {args.metadata}")
+    try:
+        with open(metadata_p) as f:
+            experiment_metadata = json.load(f)
+            channel_names = experiment_metadata["channelNames"]["channelNamesArray"]
+            experiment_name = experiment_metadata["name"]
+    except:
+        raise Exception(f"Failed loading channel names and experiment name from metadata file: {args.metadata}")
+
+    # load slide
     path = Path(args.inputfile)
-
     slide = CODEXSlide(str(path))
-    print(f"loaded image of shape {slide.shape}")
+    print(f"loaded image of shape {slide.slide.shape_list[0]}")
 
-    # convert cycle and channel indices into indices for collapsed array
-    n_channels = slide.slide.shape_list[0][2]
+    n_channels = slide.slide.shape_list[0][3]
     n_cycles = slide.slide.shape_list[0][4]
+
+    # for array where channels are rows, and cycles are columns:
+    # PathML collapses CODEX runs using row-major indexing, while CODEX processor uses column-major
+    # Need to be careful when indexing channels, and convert when needed
+    channel_map = []
+    for chan_ix in range(n_channels):
+        for cyc_ix in range(n_cycles):
+            pathml_ix = cyc_ix * n_channels + chan_ix
+            channel_map.append(pathml_ix)
+
+    # channel names ordered as they are in PathML after CollapseRunsCODEX
+    channel_names_pathml = [channel_names[i] for i in channel_map]
 
     nucleus_marker_index = args.nuc_cyc_ix * n_cycles + args.nuc_chan_ix
     cytoplasm_marker_index = args.cyto_cyc_ix * n_cycles + args.cyto_chan_ix
+
+    print(f"Using nucleus marker: {channel_names_pathml[nucleus_marker_index]}")
+    print(f"Using cytoplasm marker: {channel_names_pathml[cytoplasm_marker_index]}")
 
     # Define a pipeline
     pipe = Pipeline([
@@ -47,19 +80,34 @@ if __name__ == '__main__':
         QuantifyMIF(segmentation_mask='cell_segmentation')
     ])
 
-    print("Starting pipeline...")
+    print(f"Starting pipeline with tile size {args.tile_size}...")
     t1 = time.time()
 
-    slide.run(pipe, distributed = False, tile_size= slide.shape, tile_pad=False)
+    slide.run(pipe, distributed = False, tile_size= args.tile_size, tile_pad=False, overwrite_existing_tiles=True)
 
     t2 = time.time()
     print(f"Finished running pipeline ({str(timedelta(seconds = t2 - t1))})")
 
     print(f"Counts matrix generated: {slide.counts.shape[0]} cells, {slide.counts.shape[1]} markers")
 
-    print(f"Saving counts matrix to: {path.name}.h5ad")
-    # write the count matrix to file
-    slide.counts.write(f"{path.name}.h5ad")
+    # convert counts matrix to CSV in format for MAV. Formatting for MAV is very particular
+    counts = slide.counts.to_memory()
+    mav_df = pd.DataFrame(counts.X, columns = [name + " Nucleus Intensity" for name in channel_names_pathml])
+    # reorder back to CODEX channel order
+    mav_df = mav_df.iloc[:, [channel_map.index(i) for i in range(len(channel_map))]]
+    mav_df["XMin"] = counts.obs.x.values
+    mav_df["XMax"] = counts.obs.x.values
+    mav_df["YMin"] = counts.obs.y.values
+    mav_df["YMax"] = counts.obs.y.values
+    mav_df['Object ID'] = mav_df.index
+    mav_df['Cell ID'] = mav_df.index
+    fname = f"test-reg001_{experiment_name}.csv"
+    mav_df.to_csv(fname)
+    print(f"Saved counts matrix to: {fname}")
+    # write the count matrix to file in AnnData format
+    if args.save_anndata:
+        print(f"Saving AnnData counts matrix to: {experiment_name}.h5ad")
+        slide.counts.write(f"{experiment_name}.h5ad")
 
     del slide
     print("done")
