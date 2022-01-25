@@ -5,6 +5,7 @@ import time
 from datetime import timedelta
 import json
 import pandas as pd
+import csv
 
 from pathml.core import CODEXSlide
 from pathml.preprocessing import Pipeline, CollapseRunsCODEX, SegmentMIF, QuantifyMIF
@@ -32,8 +33,6 @@ if __name__ == '__main__':
 
     # load metadata, get channel names
     metadata_p = Path(args.metadata)
-    # metadata_p = Path("/Users/jacobrosenthal/data/molecular_imaging_core/Exp. 273 - 111521SM-HNC2/experiment.json")
-
     if not (metadata_p.is_file() and metadata_p.suffix == ".json"):
         raise ValueError(f"Input metadata file invalid: {args.metadata}")
     try:
@@ -44,6 +43,15 @@ if __name__ == '__main__':
     except:
         raise Exception(f"Failed loading channel names and experiment name from metadata file: {args.metadata}")
 
+    # need to uniquify channel names, e.g. "Blank", "Blank" --> "Blank-1", "Blank-2"
+    # from: https://stackoverflow.com/a/30650847/17836677
+    newlist = []
+    for i, v in enumerate(channel_names):
+        totalcount = channel_names.count(v)
+        count = channel_names[:i].count(v)
+        newlist.append(v + "-" + str(count + 1) if totalcount > 1 else v)
+    channel_names = newlist
+
     # load slide
     path = Path(args.inputfile)
     slide = CODEXSlide(str(path))
@@ -51,6 +59,7 @@ if __name__ == '__main__':
 
     n_channels = slide.slide.shape_list[0][3]
     n_cycles = slide.slide.shape_list[0][4]
+    print(f"n channels: {n_channels}\tn cycles: {n_cycles}")
 
     # for array where channels are rows, and cycles are columns:
     # PathML collapses CODEX runs using row-major indexing, while CODEX processor uses column-major
@@ -64,8 +73,8 @@ if __name__ == '__main__':
     # channel names ordered as they are in PathML after CollapseRunsCODEX
     channel_names_pathml = [channel_names[i] for i in channel_map]
 
-    nucleus_marker_index = args.nuc_cyc_ix * n_cycles + args.nuc_chan_ix
-    cytoplasm_marker_index = args.cyto_cyc_ix * n_cycles + args.cyto_chan_ix
+    nucleus_marker_index = args.nuc_chan_ix * n_cycles + args.nuc_cyc_ix
+    cytoplasm_marker_index = args.cyto_chan_ix * n_cycles + args.cyto_cyc_ix
 
     print(f"Using nucleus marker: {channel_names_pathml[nucleus_marker_index]}")
     print(f"Using cytoplasm marker: {channel_names_pathml[cytoplasm_marker_index]}")
@@ -99,10 +108,10 @@ if __name__ == '__main__':
     mav_df["XMax"] = counts.obs.x.values
     mav_df["YMin"] = counts.obs.y.values
     mav_df["YMax"] = counts.obs.y.values
-    mav_df['Object ID'] = mav_df.index
     mav_df['Cell ID'] = mav_df.index
-    fname = f"test-reg001_{experiment_name}.csv"
-    mav_df.to_csv(fname)
+    mav_df['Object ID'] = mav_df.index
+    fname = f"reg001_{experiment_name}.csv"
+    mav_df.to_csv(fname, quoting = csv.QUOTE_ALL)
     print(f"Saved counts matrix to: {fname}")
     # write the count matrix to file in AnnData format
     if args.save_anndata:
