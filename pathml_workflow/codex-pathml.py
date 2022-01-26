@@ -104,10 +104,10 @@ if __name__ == '__main__':
     mav_df = pd.DataFrame(counts.X, columns = [name + " Nucleus Intensity" for name in channel_names_pathml])
     # reorder back to CODEX channel order
     mav_df = mav_df.iloc[:, [channel_map.index(i) for i in range(len(channel_map))]]
-    mav_df["XMin"] = counts.obs.x.values
-    mav_df["XMax"] = counts.obs.x.values
-    mav_df["YMin"] = counts.obs.y.values
-    mav_df["YMax"] = counts.obs.y.values
+    mav_df["XMin"] = counts.obs.y.values
+    mav_df["XMax"] = counts.obs.y.values
+    mav_df["YMin"] = counts.obs.x.values
+    mav_df["YMax"] = counts.obs.x.values
     mav_df['Cell ID'] = mav_df.index
     mav_df['Object ID'] = mav_df.index
     fname = f"reg001_{experiment_name}.csv"
