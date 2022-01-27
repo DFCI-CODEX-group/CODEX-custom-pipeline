@@ -92,7 +92,7 @@ if __name__ == '__main__':
     print(f"Starting pipeline with tile size {args.tile_size}...")
     t1 = time.time()
 
-    slide.run(pipe, distributed = False, tile_size= args.tile_size, tile_pad=False, overwrite_existing_tiles=True)
+    slide.run(pipe, distributed = False, tile_size= args.tile_size, tile_pad=False, overwrite_existing_tiles=True, normalize=False)
 
     t2 = time.time()
     print(f"Finished running pipeline ({str(timedelta(seconds = t2 - t1))})")
