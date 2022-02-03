@@ -4,11 +4,45 @@ from pathlib import Path
 import time
 from datetime import timedelta
 import json
+import os
+import numpy as np
 import pandas as pd
 import csv
+import sys
+import skimage
+# silence copious tensorflow warnings
+import tensorflow as tf
+tf.get_logger().setLevel("ERROR")
 
+import pathml
 from pathml.core import CODEXSlide
 from pathml.preprocessing import Pipeline, CollapseRunsCODEX, SegmentMIF, QuantifyMIF
+
+
+class MembraneMarkerWatershed(pathml.preprocessing.transforms.Transform):
+    """
+    Performs marker-controlled watershed segmentation.
+    Uses nuclei segmentation as markers. Adds result to tile as "watershed" segmentation mask.
+    Wraps ``skimage.segmentation.watershed``
+
+    Args:
+        membrane_channel (int): index of marker to use for filling with watershed algorithm
+        segmentation_mask (str): name of segmentation mask to use as markers
+        watershed_line (bool): If watershed_line is True, a one-pixel wide line separates the regions obtained
+          by the watershed algorithm. The line has the label 0.
+    """
+    def __init__(self, membrane_channel, segmentation_mask, watershed_line=False):
+        self.membrane_channel = membrane_channel
+        self.segmentation_mask = segmentation_mask
+        self.watershed_line = watershed_line
+
+    def apply(self, tile):
+        watershed = skimage.segmentation.watershed(
+            image = tile.image[..., self.membrane_channel],
+            markers = tile.masks[self.segmentation_mask].squeeze(2),
+            watershed_line = self.watershed_line
+        )
+        tile.masks["watershed"] = watershed[..., np.newaxis]
 
 
 if __name__ == '__main__':
@@ -27,10 +61,9 @@ if __name__ == '__main__':
                         help = 'channel index for cytoplasm marker (0 indexed)')
     parser.add_argument('--tile-size', required = False, default = 1024, type = int, dest = "tile_size",
                         help = 'tile size')
-    parser.add_argument('--save-anndata', required = False, default = False, type = bool, dest = "save_anndata",
-                        help = 'whether to save counts matrix to disk in AnnData `.h5ad` format')
     args = parser.parse_args()
 
+    print(f"working dir: {os.getcwd()}")
     # load metadata, get channel names
     metadata_p = Path(args.metadata)
     if not (metadata_p.is_file() and metadata_p.suffix == ".json"):
@@ -76,17 +109,21 @@ if __name__ == '__main__':
     nucleus_marker_index = args.nuc_chan_ix * n_cycles + args.nuc_cyc_ix
     cytoplasm_marker_index = args.cyto_chan_ix * n_cycles + args.cyto_cyc_ix
 
-    print(f"Using nucleus marker: {channel_names_pathml[nucleus_marker_index]}")
-    print(f"Using cytoplasm marker: {channel_names_pathml[cytoplasm_marker_index]}")
+    print(f"Using nucleus marker: {channel_names_pathml[nucleus_marker_index]}\tPathml index: {nucleus_marker_index}")
+    print(f"Using cytoplasm marker: {channel_names_pathml[cytoplasm_marker_index]}\tPathml index: {cytoplasm_marker_index}")
 
-    # Define a pipeline
+    # Define the pipeline
     pipe = Pipeline([
         CollapseRunsCODEX(z = 0),
         SegmentMIF(model='mesmer',
                    nuclear_channel=nucleus_marker_index,
                    cytoplasm_channel=cytoplasm_marker_index,
                    image_resolution=0.5),
-        QuantifyMIF(segmentation_mask='cell_segmentation')
+        MembraneMarkerWatershed(
+            membrane_channel = cytoplasm_marker_index,
+            segmentation_mask = 'nuclear_segmentation',
+            watershed_line = True),
+        QuantifyMIF(segmentation_mask='watershed')
     ])
 
     print(f"Starting pipeline with tile size {args.tile_size}...")
@@ -113,10 +150,10 @@ if __name__ == '__main__':
     fname = f"reg001_{experiment_name}.csv"
     mav_df.to_csv(fname, quoting = csv.QUOTE_ALL)
     print(f"Saved counts matrix to: {fname}")
-    # write the count matrix to file in AnnData format
-    if args.save_anndata:
-        print(f"Saving AnnData counts matrix to: {experiment_name}.h5ad")
-        slide.counts.write(f"{experiment_name}.h5ad")
+
+    slide.write(f"{experiment_name}.h5path")
+    print(f"Saved h5path to: {experiment_name}.h5path")
 
     del slide
     print("done")
+    sys.exit()
