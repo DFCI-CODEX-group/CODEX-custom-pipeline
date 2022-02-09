@@ -10,6 +10,7 @@ import pandas as pd
 import csv
 import sys
 import skimage
+import javabridge
 # silence copious tensorflow warnings
 import tensorflow as tf
 tf.get_logger().setLevel("ERROR")
@@ -17,6 +18,39 @@ tf.get_logger().setLevel("ERROR")
 import pathml
 from pathml.core import CODEXSlide
 from pathml.preprocessing import Pipeline, CollapseRunsCODEX, SegmentMIF, QuantifyMIF
+
+
+class FilterEdgeCells(pathml.preprocessing.transforms.Transform):
+    """
+    Filter out cells from counts matrix which are within certain number of px from edge of tile.
+    When using overlapping tiles, this can be used to avoid double-counting cells that occur in the overlap.
+
+    Args:
+        edge_distance (int): distance from edge at which cells are to be filtered (e.g. 100px)
+        slide_shape (tuple): dimensions of wsi (e.g. slide.shape).
+            Used to check whether an individual tile is on the edge or not.
+    """
+    def __init__(self, edge_distance, slide_shape):
+        self.edge_distance = edge_distance
+        self.slide_shape = slide_shape
+
+    def apply(self, tile):
+        # first check if tile is on the edge
+        i, j = tile.coords
+        di, dj = tile.shape[0:2]
+        edge_top = i == 0
+        edge_bottom = i + di > self.slide_shape[0]
+        edge_left = j == 0
+        edge_right = j + dj > self.slide_shape[1]
+
+        # this logic filters out obs around each edge
+        # the or condition in each row keeps edge obs, if it's an edge tile
+        counts = tile.counts.copy()
+        newcounts = counts[((counts.obs.y > i + self.edge_distance) | edge_top) &
+                           ((counts.obs.y < i + tile.shape[0] - self.edge_distance) | edge_bottom) &
+                           ((counts.obs.x > j + self.edge_distance) | edge_left) &
+                           ((counts.obs.x < j + tile.shape[1] - self.edge_distance) | edge_right)]
+        tile.counts = newcounts.copy()
 
 
 class MembraneMarkerWatershed(pathml.preprocessing.transforms.Transform):
@@ -27,28 +61,30 @@ class MembraneMarkerWatershed(pathml.preprocessing.transforms.Transform):
 
     Args:
         membrane_channel (int): index of marker to use for filling with watershed algorithm
-        segmentation_mask (str): name of segmentation mask to use as markers
+        marker_segmentation_mask (str): name of segmentation mask to use as markers
         watershed_line (bool): If watershed_line is True, a one-pixel wide line separates the regions obtained
-          by the watershed algorithm. The line has the label 0.
+          by the watershed algorithm. The line has the label 0. Defaults to True.
+        mask_name (str): name for new mask. Defaults to "watershed"
     """
-    def __init__(self, membrane_channel, segmentation_mask, watershed_line=False):
+    def __init__(self, membrane_channel, marker_segmentation_mask, watershed_line=True, mask_name="watershed"):
         self.membrane_channel = membrane_channel
-        self.segmentation_mask = segmentation_mask
+        self.marker_segmentation_mask = marker_segmentation_mask
         self.watershed_line = watershed_line
+        self.mask_name = mask_name
 
     def apply(self, tile):
         watershed = skimage.segmentation.watershed(
             image = tile.image[..., self.membrane_channel],
-            markers = tile.masks[self.segmentation_mask].squeeze(2),
+            markers = tile.masks[self.marker_segmentation_mask].squeeze(2),
             watershed_line = self.watershed_line
         )
-        tile.masks["watershed"] = watershed[..., np.newaxis]
+        tile.masks[self.mask_name] = watershed[..., np.newaxis]
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description = 'CODEX analysis pipeline')
     parser.add_argument('--input-image', required = True, type = pathlib.Path, dest = "inputfile",
-                        help = 'path to input tiff file')
+                        help = 'path to input stacked tiff file')
     parser.add_argument('--metadata', required = True, type = pathlib.Path,
                         help = 'path to experiment metadata (`experiment.json`)')
     parser.add_argument('--nucleus_marker_cycle_index', required = True, type = int, dest = "nuc_cyc_ix",
@@ -60,10 +96,13 @@ if __name__ == '__main__':
     parser.add_argument('--cytoplasm_marker_channel_index', required = True, type = int, dest = "cyto_chan_ix",
                         help = 'channel index for cytoplasm marker (0 indexed)')
     parser.add_argument('--tile-size', required = False, default = 1024, type = int, dest = "tile_size",
-                        help = 'tile size')
+                        help = 'tile size (pixels)')
+    parser.add_argument('--tile-overlap', required = False, default = 200, type = int, dest = "tile_overlap",
+                        help = 'overlap between tiles (pixels)')
     args = parser.parse_args()
 
     print(f"working dir: {os.getcwd()}")
+    print(f"pathml Version: {pathml.__version__}")
     # load metadata, get channel names
     metadata_p = Path(args.metadata)
     if not (metadata_p.is_file() and metadata_p.suffix == ".json"):
@@ -115,21 +154,29 @@ if __name__ == '__main__':
     # Define the pipeline
     pipe = Pipeline([
         CollapseRunsCODEX(z = 0),
-        SegmentMIF(model='mesmer',
-                   nuclear_channel=nucleus_marker_index,
-                   cytoplasm_channel=cytoplasm_marker_index,
-                   image_resolution=0.5),
+        SegmentMIF(
+            model = 'mesmer',
+            nuclear_channel = nucleus_marker_index,
+            cytoplasm_channel = cytoplasm_marker_index,
+            image_resolution = 0.5),
         MembraneMarkerWatershed(
             membrane_channel = cytoplasm_marker_index,
-            segmentation_mask = 'nuclear_segmentation',
-            watershed_line = True),
-        QuantifyMIF(segmentation_mask='watershed')
+            marker_segmentation_mask = "nuclear_segmentation",
+            watershed_line = True,
+            mask_name = "watershed"),
+        QuantifyMIF(segmentation_mask = 'watershed'),
+        FilterEdgeCells(edge_distance = args.tile_overlap / 2, slide_shape = slide.shape)
     ])
 
-    print(f"Starting pipeline with tile size {args.tile_size}...")
+    print(f"Starting pipeline with tile size {args.tile_size}, tile overlap {args.tile_overlap}...")
     t1 = time.time()
 
-    slide.run(pipe, distributed = False, tile_size= args.tile_size, tile_pad=False, overwrite_existing_tiles=True, normalize=False)
+    slide.run(pipe,
+              distributed = False,
+              tile_size = args.tile_size,
+              tile_stride = args.tile_size - args.tile_overlap,
+              tile_pad = True,
+              normalize = False)
 
     t2 = time.time()
     print(f"Finished running pipeline ({str(timedelta(seconds = t2 - t1))})")
@@ -141,10 +188,10 @@ if __name__ == '__main__':
     mav_df = pd.DataFrame(counts.X, columns = [name + " Nucleus Intensity" for name in channel_names_pathml])
     # reorder back to CODEX channel order
     mav_df = mav_df.iloc[:, [channel_map.index(i) for i in range(len(channel_map))]]
-    mav_df["XMin"] = counts.obs.y.values
-    mav_df["XMax"] = counts.obs.y.values
-    mav_df["YMin"] = counts.obs.x.values
-    mav_df["YMax"] = counts.obs.x.values
+    mav_df["XMin"] = counts.obs.x.values
+    mav_df["XMax"] = counts.obs.x.values
+    mav_df["YMin"] = counts.obs.y.values
+    mav_df["YMax"] = counts.obs.y.values
     mav_df['Cell ID'] = mav_df.index
     mav_df['Object ID'] = mav_df.index
     fname = f"reg001_{experiment_name}.csv"
@@ -154,6 +201,4 @@ if __name__ == '__main__':
     slide.write(f"{experiment_name}.h5path")
     print(f"Saved h5path to: {experiment_name}.h5path")
 
-    del slide
-    print("done")
-    sys.exit()
+    javabridge.kill_vm()
