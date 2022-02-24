@@ -37,6 +37,8 @@ if __name__ == '__main__':
                         help = 'tile size (pixels)')
     parser.add_argument('--tile-overlap', required = False, default = 200, type = int, dest = "tile_overlap",
                         help = 'overlap between tiles (pixels)')
+    parser.add_argument('--prefix', required = False, default = None, type = str, dest = "prefix",
+                        help = 'prefix for files saved to disk')
     args = parser.parse_args()
 
     print(f"working dir: {os.getcwd()}")
@@ -132,11 +134,11 @@ if __name__ == '__main__':
     mav_df["YMax"] = counts.obs.y.values
     mav_df['Cell ID'] = mav_df.index
     mav_df['Object ID'] = mav_df.index
-    fname = f"reg001_{experiment_name}.csv"
+    fname = f"{args.prefix}_reg001_{experiment_name}.csv"
     mav_df.to_csv(fname, quoting = csv.QUOTE_ALL)
     print(f"Saved counts matrix to: {fname}")
 
-    slide.write(f"{experiment_name}.h5path")
-    print(f"Saved h5path to: {experiment_name}.h5path")
+    slide.write(f"{args.prefix + '_' + experiment_name}.h5path")
+    print(f"Saved h5path to: {args.prefix + '_' +experiment_name}.h5path")
 
     javabridge.kill_vm()
