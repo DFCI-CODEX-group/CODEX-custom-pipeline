@@ -14,6 +14,10 @@ class REDSEAQuantifyMIF(Transform):
     For each cell, signal from the boundary pixels is reinforced, while signal from boundary pixels of neighboring
     cells is subtracted.
 
+    Should be used with a segmentation mask where zeros are background, and pixels belonging to each of n
+    cells are labelled with integers 1 to n, with a line of zeros separating adjacent regions.
+    For example, the output of ``skimage.segmentation.watershed`` with ``watershed_line=True``.
+
     Counts objects are used to interface with the Python single cell analysis ecosystem in
     `Scanpy <https://scanpy.readthedocs.io/en/stable/>`_.
     The counts object contains a summary of channel statistics in each cell along with its coordinate.
@@ -50,7 +54,7 @@ class REDSEAQuantifyMIF(Transform):
         Args:
             img (np.ndarray): (h, w, n_channels) Input image
             segmentation (np.ndarray): (h, w) segmentation mask. Zeros are background, and pixels belonging to each of n
-                cells are labelled with integers 1 to n
+                cells are labelled with integers 1 to n, with a line of zeros separating adjacent regions.
             coords_offset (tuple, optional): Coordinates (i, j) used to convert tile-level coordinates to slide-level.
                 Defaults to (0, 0) for no offset.
 
@@ -118,7 +122,7 @@ class REDSEAQuantifyMIF(Transform):
 
         Args:
             mask (np.ndarray): (h, w) segmentation mask. Zeros are background, and pixels belonging to each of n
-                cells are labelled with integers 1 to n
+                cells are labelled with integers 1 to n, with a line of zeros separating adjacent regions.
             element_size (int): width of structuring element used to determine if the pixel is a boundary pixel.
                 Defaults to 2.
             element_shape (str): shape of structuring element used to determine if the pixel is a boundary pixel.
@@ -159,7 +163,7 @@ class REDSEAQuantifyMIF(Transform):
 
         Args:
             mask (np.ndarray): (h, w) segmentation mask. Zeros are background, and pixels belonging to each of n
-                cells are labelled with integers 1 to n
+                cells are labelled with integers 1 to n, with a line of zeros separating adjacent regions.
 
         Returns:
             np.ndarray: (n_cells, n_cells) array where the i,jth element gives b_ij / P_j, i.e. the number of boundary pixels
@@ -209,12 +213,11 @@ class REDSEAQuantifyMIF(Transform):
         Args:
             img (np.ndarray): (h, w, n_channels) Input image
             mask (np.ndarray): (h, w) segmentation mask. Zeros are background, and pixels belonging to each of n
-                cells are labelled with integers 1 to n
+                cells are labelled with integers 1 to n, with a line of zeros separating adjacent regions.
 
         Returns:
             np.ndarray: counts matrix (n_cells, n_channels)
         """
-
         labels = np.unique(mask)
         # remove zero label (background pixels)
         labels = [item for item in labels if item != 0]
