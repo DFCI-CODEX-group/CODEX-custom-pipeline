@@ -61,6 +61,13 @@ class REDSEAQuantifyMIF(Transform):
         Returns:
             anndata.AnnData: Counts matrix
         """
+        if segmentation.ndim == 3 and segmentation.shape[2] == 1:
+            segmentation = segmentation.squeeze(axis = 2)
+
+        assert segmentation.ndim == 2 and segmentation.shape == img.shape[0:2] and img.ndim == 3, \
+            f"segmentation of shape {segmentation.shape} does not match image of shape {img.shape}. " \
+            f"Must be of shapes (i, j) and (i, j, n_channels), respectively."
+
         counts_redsea = self.compute_redsea_counts_matrix(img=img, mask=segmentation)
 
         ### this part copied from QuantifyMIF

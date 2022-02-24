@@ -16,7 +16,7 @@ import pathml
 from pathml.core import CODEXSlide
 from pathml.preprocessing import Pipeline, CollapseRunsCODEX, SegmentMIF, QuantifyMIF
 
-from .transforms import FilterEdgeCells, MembraneMarkerWatershed, REDSEAQuantifyMIF
+from transforms import FilterEdgeCells, MembraneMarkerWatershed, REDSEAQuantifyMIF
 
 
 if __name__ == '__main__':
