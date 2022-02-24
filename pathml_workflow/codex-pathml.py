@@ -5,11 +5,8 @@ import time
 from datetime import timedelta
 import json
 import os
-import numpy as np
 import pandas as pd
 import csv
-import sys
-import skimage
 import javabridge
 # silence copious tensorflow warnings
 import tensorflow as tf
@@ -19,66 +16,7 @@ import pathml
 from pathml.core import CODEXSlide
 from pathml.preprocessing import Pipeline, CollapseRunsCODEX, SegmentMIF, QuantifyMIF
 
-
-class FilterEdgeCells(pathml.preprocessing.transforms.Transform):
-    """
-    Filter out cells from counts matrix which are within certain number of px from edge of tile.
-    When using overlapping tiles, this can be used to avoid double-counting cells that occur in the overlap.
-
-    Args:
-        edge_distance (int): distance from edge at which cells are to be filtered (e.g. 100px)
-        slide_shape (tuple): dimensions of wsi (e.g. slide.shape).
-            Used to check whether an individual tile is on the edge or not.
-    """
-    def __init__(self, edge_distance, slide_shape):
-        self.edge_distance = edge_distance
-        self.slide_shape = slide_shape
-
-    def apply(self, tile):
-        # first check if tile is on the edge
-        i, j = tile.coords
-        di, dj = tile.shape[0:2]
-        edge_top = i == 0
-        edge_bottom = i + di > self.slide_shape[0]
-        edge_left = j == 0
-        edge_right = j + dj > self.slide_shape[1]
-
-        # this logic filters out obs around each edge
-        # the or condition in each row keeps edge obs, if it's an edge tile
-        counts = tile.counts.copy()
-        newcounts = counts[((counts.obs.y > i + self.edge_distance) | edge_top) &
-                           ((counts.obs.y < i + tile.shape[0] - self.edge_distance) | edge_bottom) &
-                           ((counts.obs.x > j + self.edge_distance) | edge_left) &
-                           ((counts.obs.x < j + tile.shape[1] - self.edge_distance) | edge_right)]
-        tile.counts = newcounts.copy()
-
-
-class MembraneMarkerWatershed(pathml.preprocessing.transforms.Transform):
-    """
-    Performs marker-controlled watershed segmentation.
-    Uses nuclei segmentation as markers. Adds result to tile as "watershed" segmentation mask.
-    Wraps ``skimage.segmentation.watershed``
-
-    Args:
-        membrane_channel (int): index of marker to use for filling with watershed algorithm
-        marker_segmentation_mask (str): name of segmentation mask to use as markers
-        watershed_line (bool): If watershed_line is True, a one-pixel wide line separates the regions obtained
-          by the watershed algorithm. The line has the label 0. Defaults to True.
-        mask_name (str): name for new mask. Defaults to "watershed"
-    """
-    def __init__(self, membrane_channel, marker_segmentation_mask, watershed_line=True, mask_name="watershed"):
-        self.membrane_channel = membrane_channel
-        self.marker_segmentation_mask = marker_segmentation_mask
-        self.watershed_line = watershed_line
-        self.mask_name = mask_name
-
-    def apply(self, tile):
-        watershed = skimage.segmentation.watershed(
-            image = tile.image[..., self.membrane_channel],
-            markers = tile.masks[self.marker_segmentation_mask].squeeze(2),
-            watershed_line = self.watershed_line
-        )
-        tile.masks[self.mask_name] = watershed[..., np.newaxis]
+from .transforms import FilterEdgeCells, MembraneMarkerWatershed, REDSEAQuantifyMIF
 
 
 if __name__ == '__main__':
@@ -164,7 +102,7 @@ if __name__ == '__main__':
             marker_segmentation_mask = "nuclear_segmentation",
             watershed_line = True,
             mask_name = "watershed"),
-        QuantifyMIF(segmentation_mask = 'watershed'),
+        REDSEAQuantifyMIF(segmentation_mask = 'watershed'),
         FilterEdgeCells(edge_distance = args.tile_overlap / 2, slide_shape = slide.shape)
     ])
 
