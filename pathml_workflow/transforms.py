@@ -214,14 +214,13 @@ class REDSEAQuantifyMIF(Transform):
             for label1, label2 in itertools.permutations(adj_labels, 2):
                 cell_adjacencies[label1 - 1, label2 - 1] += 1
 
+        # raise if any of the cell perimeters are zero, since this will introduce NaNs in the next division step
+        # also this really shouldn't ever happen, since every region has to have a perimeter>0
         if np.any(cell_perimeters == 0):
-            raise ValueError("Cell perimeters contains zeros!!")
+            raise ValueError("Cell perimeters in _compute_pairwise_matrix() contains zeros!!")
 
         # divide to get fraction
         cell_adjacencies = cell_adjacencies / cell_perimeters
-
-        if np.isnan(cell_adjacencies).any():
-            print("Na values in cell_adjacencies matrix, in _compute_pairwise_matrix")
 
         return cell_adjacencies
 
@@ -272,27 +271,14 @@ class REDSEAQuantifyMIF(Transform):
         # computes the weighted sum of border counts, to be subtracted
         counts_subtract = cell_pair_weights @ counts_border
 
-        if np.isnan(counts).any():
-            print("NaN values in counts")
-        if np.isnan(counts_subtract).any():
-            print("NaN values in counts_subtract")
-        if np.isnan(counts_border).any():
-            print("NaN values in counts_border")
-
         # now apply reinforcement and subtraction
         counts_redsea = counts + counts_border - counts_subtract
 
         # normalize by cell area
         counts_redsea = np.diag([1 / cell_size for cell_size in cell_sizes]) @ counts_redsea
 
-        if np.isnan(counts_redsea).any():
-            print("NaN values in counts_redsea after normalizing by cell area")
-
         # clip negative values to 0
         counts_redsea = counts_redsea.clip(0)
-
-        if np.isnan(counts_redsea).any():
-            print("NaN values in counts_redsea after clipping")
 
         return counts_redsea
 

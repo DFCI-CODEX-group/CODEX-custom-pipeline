@@ -110,8 +110,7 @@ if __name__ == '__main__':
             watershed_line = True,
             mask_name = "watershed"),
         REDSEAQuantifyMIF(segmentation_mask = 'watershed'),
-        FilterEdgeCells(edge_distance = args.tile_overlap / 2, slide_shape = slide.shape),
-        CheckNACounts()
+        FilterEdgeCells(edge_distance = args.tile_overlap / 2, slide_shape = slide.shape)
     ])
 
     print(f"Starting pipeline with tile size {args.tile_size}, tile overlap {args.tile_overlap}...")
