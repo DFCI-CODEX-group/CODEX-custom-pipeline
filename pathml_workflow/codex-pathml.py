@@ -85,6 +85,11 @@ if __name__ == '__main__':
     # channel names ordered as they are in PathML after CollapseRunsCODEX
     channel_names_pathml = [channel_names[i] for i in channel_map]
 
+    # write channel names in PathML order for use later:
+    with open(f'{args.prefix + "_" + experiment_name}_h5path_channel_order.txt', 'w') as f:
+        for c, item in enumerate(channel_names_pathml):
+            f.write(f"{c}\t{item}\n")
+
     nucleus_marker_index = args.nuc_chan_ix * n_cycles + args.nuc_cyc_ix
     cytoplasm_marker_index = args.cyto_chan_ix * n_cycles + args.cyto_cyc_ix
 
