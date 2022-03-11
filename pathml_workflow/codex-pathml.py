@@ -16,7 +16,7 @@ import pathml
 from pathml.core import CODEXSlide
 from pathml.preprocessing import Pipeline, CollapseRunsCODEX, SegmentMIF, QuantifyMIF
 
-from transforms import FilterEdgeCells, MembraneMarkerWatershed, REDSEAQuantifyMIF
+from transforms import FilterEdgeCells, MembraneMarkerWatershed, REDSEAQuantifyMIF, CheckNACounts
 
 
 if __name__ == '__main__':
@@ -105,7 +105,8 @@ if __name__ == '__main__':
             watershed_line = True,
             mask_name = "watershed"),
         REDSEAQuantifyMIF(segmentation_mask = 'watershed'),
-        FilterEdgeCells(edge_distance = args.tile_overlap / 2, slide_shape = slide.shape)
+        FilterEdgeCells(edge_distance = args.tile_overlap / 2, slide_shape = slide.shape),
+        CheckNACounts()
     ])
 
     print(f"Starting pipeline with tile size {args.tile_size}, tile overlap {args.tile_overlap}...")
