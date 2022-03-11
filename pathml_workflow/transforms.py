@@ -185,6 +185,11 @@ class REDSEAQuantifyMIF(Transform):
         # check to make sure that labels are consecutive
         assert n_cells == np.max(mask), "labels must be consecutive ints from 1:n"
 
+        # Add a padding of zeros around outside as well
+        # Since zero pixels are used to count cell perimeters, this is necessary otherwise perimeter will be
+        # underestimated for cells touching image border
+        mask = np.pad(mask, pad_width = 1, mode = 'constant', constant_values = 0)
+
         cell_perimeters = np.zeros(n_cells)
         cell_adjacencies = np.zeros((n_cells, n_cells))  # cell-cell shared perimeter matrix container
 
@@ -299,8 +304,6 @@ class REDSEAQuantifyMIF(Transform):
         Note that skimage.segmentation.watershed does have a ``watershed_line`` parameter that is supposed to do this,
         but it is buggy (See: https://github.com/scikit-image/scikit-image/issues/6279) so this is a simple
         reimplementation using morphological operations
-        Also adds a row of zeros around the border of the image. Since zero pixels are used to count cell perimeters,
-        this is necessary otherwise perimeter will be underestimated for cells touching image border
 
         Args:
             segmentation (np.ndarray): Segmentation mask. Zeros are background, and pixels belonging to each of n
@@ -315,8 +318,6 @@ class REDSEAQuantifyMIF(Transform):
         boundaries = skimage.morphology.thin(boundaries)
         # zero out the boundary pixels that we identified
         segmentation[boundaries] = 0
-        # put zeros around outsides as well
-        segmentation = skimage.segmentation.clear_border(segmentation)
         return segmentation
 
 
