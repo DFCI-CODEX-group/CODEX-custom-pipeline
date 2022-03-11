@@ -15,8 +15,7 @@ class REDSEAQuantifyMIF(Transform):
     cells is subtracted.
 
     Should be used with a segmentation mask where zeros are background, and pixels belonging to each of n
-    cells are labelled with integers 1 to n, with a line of zeros separating adjacent regions.
-    For example, the output of ``skimage.segmentation.watershed`` with ``watershed_line=True``.
+    cells are labelled with integers 1 to n.
 
     Counts objects are used to interface with the Python single cell analysis ecosystem in
     `Scanpy <https://scanpy.readthedocs.io/en/stable/>`_.
@@ -54,7 +53,7 @@ class REDSEAQuantifyMIF(Transform):
         Args:
             img (np.ndarray): (h, w, n_channels) Input image
             segmentation (np.ndarray): (h, w) segmentation mask. Zeros are background, and pixels belonging to each of n
-                cells are labelled with integers 1 to n, with a line of zeros separating adjacent regions.
+                cells are labelled with integers 1 to n.
             coords_offset (tuple, optional): Coordinates (i, j) used to convert tile-level coordinates to slide-level.
                 Defaults to (0, 0) for no offset.
 
@@ -68,7 +67,9 @@ class REDSEAQuantifyMIF(Transform):
             f"segmentation of shape {segmentation.shape} does not match image of shape {img.shape}. " \
             f"Must be of shapes (i, j) and (i, j, n_channels), respectively."
 
-        counts_redsea = self.compute_redsea_counts_matrix(img=img, mask=segmentation)
+        segmentation_zero_boundary = self.get_segmentation_zero_boundary(segmentation)
+
+        counts_redsea = self.compute_redsea_counts_matrix(img=img, mask=segmentation_zero_boundary)
 
         ### this part copied from QuantifyMIF
         countsdataframe = regionprops_table(
@@ -208,8 +209,14 @@ class REDSEAQuantifyMIF(Transform):
             for label1, label2 in itertools.permutations(adj_labels, 2):
                 cell_adjacencies[label1 - 1, label2 - 1] += 1
 
+        if np.any(cell_perimeters == 0):
+            raise ValueError("Cell perimeters contains zeros!!")
+
         # divide to get fraction
         cell_adjacencies = cell_adjacencies / cell_perimeters
+
+        if np.isnan(cell_adjacencies).any():
+            print("Na values in cell_adjacencies matrix, in _compute_pairwise_matrix")
 
         return cell_adjacencies
 
@@ -260,16 +267,53 @@ class REDSEAQuantifyMIF(Transform):
         # computes the weighted sum of border counts, to be subtracted
         counts_subtract = cell_pair_weights @ counts_border
 
+        if np.isnan(counts).any():
+            print("NaN values in counts")
+        if np.isnan(counts_subtract).any():
+            print("NaN values in counts_subtract")
+        if np.isnan(counts_border).any():
+            print("NaN values in counts_border")
+
         # now apply reinforcement and subtraction
         counts_redsea = counts + counts_border - counts_subtract
 
         # normalize by cell area
         counts_redsea = np.diag([1 / cell_size for cell_size in cell_sizes]) @ counts_redsea
 
+        if np.isnan(counts_redsea).any():
+            print("NaN values in counts_redsea after normalizing by cell area")
+
         # clip negative values to 0
         counts_redsea = counts_redsea.clip(0)
 
+        if np.isnan(counts_redsea).any():
+            print("NaN values in counts_redsea after clipping")
+
         return counts_redsea
+
+    @staticmethod
+    def get_segmentation_zero_boundary(segmentation):
+        """
+        Takes as input a segmentation mask, and adds a 1px-wide line of zero pixels between labelled regions.
+        These zero boundary pixels are relied on in later steps of the algorithm.
+        Note that skimage.segmentation.watershed does have a ``watershed_line`` parameter that is supposed to do this,
+        but it is buggy (See: https://github.com/scikit-image/scikit-image/issues/6279) so this is a simple
+        reimplementation using morphological operations
+
+        Args:
+            segmentation (np.ndarray): Segmentation mask. Zeros are background, and pixels belonging to each of n
+                cells are labelled with integers 1 to n.
+
+        Returns:
+            np.ndarray: Segmentation mask. Zeros are background, and pixels belonging to each of n
+                cells are labelled with integers 1 to n, with a line of zeros separating adjacent regions.
+        """
+        boundaries = skimage.segmentation.find_boundaries(segmentation, connectivity = 1, mode = "inner")
+        # this step thins out boundaries that are >1 px wide
+        boundaries = skimage.morphology.thin(boundaries)
+        # zero out the boundary pixels that we identified
+        segmentation[boundaries] = 0
+        return segmentation
 
 
 class FilterEdgeCells(pathml.preprocessing.transforms.Transform):
@@ -328,6 +372,19 @@ class MembraneMarkerWatershed(pathml.preprocessing.transforms.Transform):
         watershed = skimage.segmentation.watershed(
             image = tile.image[..., self.membrane_channel],
             markers = tile.masks[self.marker_segmentation_mask].squeeze(2),
-            watershed_line = self.watershed_line
+            watershed_line = False
         )
         tile.masks[self.mask_name] = watershed[..., np.newaxis]
+
+
+class CheckNACounts(pathml.preprocessing.transforms.Transform):
+    """
+    Checks is counts matrix has NA values, prints info if so
+    Used for debugging
+    """
+    def apply(self, tile):
+        if np.isnan(tile.counts.X).any():
+            print(f"Missing values in counts matrix! tile coords: {tile.coords}")
+            print(f"\tcounts shape: {tile.counts.shape}")
+            print(f"\tTotal NaNs: {np.isnan(tile.counts.X).sum()}")
+            print(f"\tRows with NaNs: {np.isnan(tile.counts.X).any(axis = 1).sum()}")
