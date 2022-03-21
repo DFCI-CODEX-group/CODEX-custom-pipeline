@@ -27,9 +27,11 @@ class REDSEAQuantifyMIF(Transform):
     Args:
         segmentation_mask (str): key indicating which mask to use as label image
         element_size (int): width of structuring element used to determine if the pixel is a boundary pixel.
-            Defaults to 2.
+            Number of pixels from center of structuring element to edge (i.e., radius), although this may be calculated
+            differently for different elements. Defaults to 2.
         element_shape (str): shape of structuring element used to determine if the pixel is a boundary pixel.
-            Defaults to "diamond" to use ``skimage.morphology.diamond``
+            Supports "diamond", "disk", "square", and "star". Defaults to "diamond".
+            See: https://scikit-image.org/docs/dev/auto_examples/numpy_operations/plot_structuring_elements.html
 
     References:
         Bai Y, Zhu B, Rovira-Clave X, Chen H, Markovic M, Chan CN, Su T-H, McIlwain DR, Estes JD,
@@ -39,11 +41,23 @@ class REDSEAQuantifyMIF(Transform):
     def __init__(self, segmentation_mask=None, element_size=2, element_shape="diamond"):
         if element_shape == "diamond":
             self.structuring_element = skimage.morphology.diamond(element_size)
+        elif element_shape == "square":
+            # square is initialized with full width, so need to convert from width from center used by other elements
+            square_size = element_size * 2 + 1
+            self.structuring_element = skimage.morphology.square(square_size)
+        elif element_shape == "disk":
+            self.structuring_element = skimage.morphology.disk(element_size)
+        elif element_shape == "star":
+            self.structuring_element = skimage.morphology.star(element_size)
         else:
             raise ValueError(f"input element shape {element_shape} not valid")
 
-        self.element_size = element_size
         self.element_shape = element_shape
+
+        assert self.structuring_element.shape % 2 == 1, \
+            f"invalid structuring element shape: {self.structuring_element.shape}. Must have odd dimensions so that" \
+            f"element can be centered on a single pixel."
+        self.element_size = (self.structuring_element.shape - 1) / 2
         self.segmentation_mask = segmentation_mask
 
     def F(self, img, segmentation, coords_offset=(0, 0)):
