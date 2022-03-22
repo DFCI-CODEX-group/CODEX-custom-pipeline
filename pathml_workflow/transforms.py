@@ -1,6 +1,7 @@
 import numpy as np
 import skimage
 from skimage.measure import regionprops_table
+from skimage.segmentation import relabel_sequential
 import anndata
 import itertools
 import pathml
@@ -54,10 +55,10 @@ class REDSEAQuantifyMIF(Transform):
 
         self.element_shape = element_shape
 
-        assert self.structuring_element.shape % 2 == 1, \
+        assert self.structuring_element.shape[0] % 2 == 1, \
             f"invalid structuring element shape: {self.structuring_element.shape}. Must have odd dimensions so that" \
             f"element can be centered on a single pixel."
-        self.element_size = (self.structuring_element.shape - 1) / 2
+        self.element_size = int((self.structuring_element.shape[0] - 1) / 2)
         self.segmentation_mask = segmentation_mask
 
     def F(self, img, segmentation, coords_offset=(0, 0)):
@@ -66,8 +67,9 @@ class REDSEAQuantifyMIF(Transform):
 
         Args:
             img (np.ndarray): (h, w, n_channels) Input image
-            segmentation (np.ndarray): (h, w) segmentation mask. Zeros are background, and pixels belonging to each of n
-                cells are labelled with integers 1 to n.
+            segmentation (np.ndarray): (h, w) segmentation mask. Zeros are background, and pixels belonging to each of n cells
+                are labelled with integers, with a line of zeros separating adjacent regions.
+                Labels will be relabeled from 1 to n.
             coords_offset (tuple, optional): Coordinates (i, j) used to convert tile-level coordinates to slide-level.
                 Defaults to (0, 0) for no offset.
 
@@ -144,7 +146,7 @@ class REDSEAQuantifyMIF(Transform):
 
         Args:
             mask (np.ndarray): (h, w) segmentation mask. Zeros are background, and pixels belonging to each of n
-                cells are labelled with integers 1 to n, with a line of zeros separating adjacent regions.
+                cells are labelled with unique integers, with a line of zeros separating adjacent regions.
             element_size (int): width of structuring element used to determine if the pixel is a boundary pixel.
                 Defaults to 2.
             element_shape (str): shape of structuring element used to determine if the pixel is a boundary pixel.
@@ -244,12 +246,17 @@ class REDSEAQuantifyMIF(Transform):
 
         Args:
             img (np.ndarray): (h, w, n_channels) Input image
-            mask (np.ndarray): (h, w) segmentation mask. Zeros are background, and pixels belonging to each of n
-                cells are labelled with integers 1 to n, with a line of zeros separating adjacent regions.
+            mask (np.ndarray): (h, w) segmentation mask. Zeros are background, and pixels belonging to each of n cells
+                are labelled with integers, with a line of zeros separating adjacent regions.
+                Labels will be relabeled from 1 to n.
 
         Returns:
             np.ndarray: counts matrix (n_cells, n_channels)
         """
+        # make sure that labels are 1:n
+        # this is relied upon later, when NxN matrix is indexed using cell labels
+        mask, _, _ = relabel_sequential(mask)
+
         labels = np.unique(mask)
         # remove zero label (background pixels)
         labels = [item for item in labels if item != 0]
