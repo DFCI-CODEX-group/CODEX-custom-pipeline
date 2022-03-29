@@ -5,8 +5,20 @@
 This is a streamlined CODEX pipeline which can be run with only 2 steps.  
 It is built using the [`PathML`](https://github.com/Dana-Farber-AIOS/pathml) toolkit.
 
-Before running, the environment must be set up with all required dependencies. 
-Please Refer to the PathML documentation for complete instructions.  
+## Environment setup
+
+Before running, the environment must be set up with all required dependencies.
+Conda is the recommended tool for environment management. 
+Download Miniconda [here](https://docs.conda.io/en/latest/miniconda.html)
+
+Create conda environment with required dependencies and install pathml:
+````
+conda env create -f environment.yml
+conda activate codex
+pip install pathml
+````
+ 
+Please refer to the [PathML documentation](https://github.com/Dana-Farber-AIOS/pathml) for complete instructions.  
 
 
 ## Instructions
