@@ -107,7 +107,7 @@ if __name__ == '__main__':
         MembraneMarkerWatershed(
             membrane_channel = cytoplasm_marker_index,
             marker_segmentation_mask = "nuclear_segmentation",
-            watershed_line = True,
+            watershed_line = False,
             mask_name = "watershed"),
         REDSEAQuantifyMIF(segmentation_mask = 'watershed'),
         FilterEdgeCells(edge_distance = args.tile_overlap / 2, slide_shape = slide.shape)
