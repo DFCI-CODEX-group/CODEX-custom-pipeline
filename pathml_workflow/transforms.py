@@ -83,7 +83,7 @@ class REDSEAQuantifyMIF(Transform):
             f"segmentation of shape {segmentation.shape} does not match image of shape {img.shape}. " \
             f"Must be of shapes (i, j) and (i, j, n_channels), respectively."
 
-        segmentation_zero_boundary = self.get_segmentation_zero_boundary(segmentation)
+        segmentation_zero_boundary = self.get_segmentation_zero_boundary(segmentation.copy())
 
         counts_redsea = self.compute_redsea_counts_matrix(img=img, mask=segmentation_zero_boundary)
 
@@ -132,7 +132,7 @@ class REDSEAQuantifyMIF(Transform):
         ), f"Tile has slide_type.stain='{tile.slide_type.stain}', but must be 'Fluor'"
         tile.counts = self.F(
             img = tile.image,
-            segmentation = tile.masks[self.segmentation_mask],
+            segmentation = tile.masks[self.segmentation_mask].copy(),
             coords_offset = tile.coords,
         )
 
