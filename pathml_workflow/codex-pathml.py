@@ -41,6 +41,13 @@ if __name__ == '__main__':
                         help = 'prefix for files saved to disk')
     args = parser.parse_args()
 
+    # TO DO: change arguments for nuclear marker and cytoplasm marker to be channel names, instead of a pair of indices
+    # e.g., "DAPI-01" or "MHC-I"
+    # then, get the corresponding index like so:
+    # nucleus_marker_index = channel_names_pathml.index(args.nucleus_marker)
+    # and throw exception if the passed name isn't in the channel names from the metadata
+    # this would be easier to use and more intuitive, and only a small change to code
+
     print(f"working dir: {os.getcwd()}")
     print(f"pathml Version: {pathml.__version__}")
     # load metadata, get channel names
