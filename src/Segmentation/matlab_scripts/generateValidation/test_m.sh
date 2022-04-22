@@ -1,1 +1,0 @@
-matlab -nodisplay -nodesktop -nosplash -nojvm -r "addpath('./matlab_scripts/generateValidation');moveToValidation('./kaggle_workflow/outputs/train_maskrcnn/','./merger/','./matlab_scripts/generateValidation/validationFileNames.mat');exit;"
