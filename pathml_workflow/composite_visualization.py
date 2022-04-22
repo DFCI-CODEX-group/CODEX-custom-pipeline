@@ -38,9 +38,8 @@ def plot_composite_segmentation(tile, mask_name, channel_names,
     if dapi is not None:
         dapi_im = tile.image[..., dapi].astype(np.uint16)
         dapi_norm = skimage.exposure.equalize_adapthist(dapi_im, clip_limit=0.03)
+        dapi_norm[dapi_norm > 0.2] = 0.2
         dapi_rgb = np.dstack([dapi_norm, dapi_norm, dapi_norm])
-        # dapi_rgb = np.clip(dapi_rgb, a_min=None, a_max=0.8)
-        dapi_rgb /= (1/0.7)
     else:
         dapi_rgb = np.dstack([_zero, _zero, _zero])    
     
@@ -65,7 +64,9 @@ def plot_composite_segmentation(tile, mask_name, channel_names,
     else:
         blue_rgb = np.dstack([_zero, _zero, _zero])
     
-    rgb_merged = dapi_rgb + red_rgb + green_rgb + blue_rgb
+    rgb_merged = red_rgb + green_rgb + blue_rgb
+    rgb_merged[rgb_merged > 0.05] += 0.2 # make colors brighter
+    rgb_merged += dapi_rgb
 
     rgb_merged = np.clip(rgb_merged, a_min=None, a_max=1)
             
