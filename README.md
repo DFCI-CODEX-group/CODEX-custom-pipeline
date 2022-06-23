@@ -39,13 +39,15 @@ If the images for each channel are saved in separate files, use the `bfconvert` 
 first stack them into a single image, before running pipeline:
 
 - Download bftools from Conda: `conda install -c ome bftools`
-- rename the files in the `stitched/` folder to follow standard pattern:
-  - no marker names in filenames (manually delete for now - we can automate this later)
+- Rename the files in the `stitched/` folder to follow standard pattern:
+  - No marker names in filenames (manually delete for now - we can automate this later)
   - Substitute "cyc" for "t": `rename 's/^cyc/t/' cyc*`. 
     This is important so that BioFormats recognizes that cycles should be associated with time.
   - Images should now be named: "t<###>_ch<###>.tif", where ### is 001, 002, 003, etc.
-- Create a pattern file: `echo "stitched/t<001-005>_ch<001-004>.tif" > stitched.pattern`
-- Run conversion and crop with bfconvert: `bfconvert stitched.pattern "converted.ome.tif"`
+- Create a pattern file: `echo "stitched/t<001-005>_ch<001-004>.tif" > stitched.pattern` 
+  - Modify the numbers in the pattern as needed to match the range of file names in your data
+  - E.g. `t<001-005>` or `t<001-016>` depending on number of cycles
+- Run conversion with bfconvert: `bfconvert stitched.pattern "converted.ome.tif"`
 
 This will stack all the channels into a single image, named `converted.ome.tif`
     
@@ -72,6 +74,23 @@ python codex-pathml.py \
 
 Running `python codex-pathml.py --help` will display more information about how to use the command line tool.
 
-The pipeline will then run, saving the resulting counts matrix in `.csv` for use with the MAV viewer.
-The saved `.h5path` file contains a counts matrix in `AnnData` format to streamline downstream analysis in 
-any of the tools from the single-cell analysis ecosystem, such as ScanPy, Seurat, etc.
+The pipeline will then run, saving output files to disk including:
+
+1. Processed image and metadata in `.h5path` format
+2. Counts matrix in `.csv`
+
+The `.csv` file is intended only for use with the MAV viewer.
+For downstream analysis of counts matrix, it is recommended to use the counts matrix in `AnnData` format which
+is contained in the processed `.h5path` file. The `AnnData` object follows a standardized data model designed to 
+streamline analysis and interoperate with any of the commonly used tools from the single-cell analysis ecosystem, 
+such as ScanPy, Seurat, etc.
+
+The `AnnData` counts matrix can be accessed as follows:
+
+```python
+from pathml import SlideData
+processed = SlideData("/path/to/processed/codex/image.h5path")
+counts = processed.counts.to_memory()
+```
+
+See the PathML documentation and example notebooks for more information on working the with `.h5path` format
