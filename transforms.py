@@ -1,11 +1,21 @@
 import numpy as np
+import pandas as pd
 import skimage
 from skimage.measure import regionprops_table
 from skimage.segmentation import relabel_sequential
+from scipy.ndimage.measurements import label
+from skimage.morphology import binary_dilation
+from skimage.filters import roberts
+from pathml.preprocessing.transforms import Transform
+from skimage.filters import roberts
+from sklearn.neighbors import kneighbors_graph
+from scipy.spatial.distance import cdist
+from skimage.morphology import disk,dilation
 import anndata
 import itertools
 import pathml
-from pathml.preprocessing.transforms import Transform
+import re
+
 
 
 class REDSEAQuantifyMIF(Transform):
@@ -29,17 +39,38 @@ class REDSEAQuantifyMIF(Transform):
         segmentation_mask (str): key indicating which mask to use as label image
         element_size (int): width of structuring element used to determine if the pixel is a boundary pixel.
             Number of pixels from center of structuring element to edge (i.e., radius), although this may be calculated
-            differently for different elements. Defaults to 2.
+            differently for different elements. Defaults to 2. Increasing it results in more aggressive correction since
+            redsea is sensitive to boundary size which increases on increasing element_size. 
         element_shape (str): shape of structuring element used to determine if the pixel is a boundary pixel.
             Supports "diamond", "disk", "square", and "star". Defaults to "diamond".
             See: https://scikit-image.org/docs/dev/auto_examples/numpy_operations/plot_structuring_elements.html
+            
+        growth (int): Extent of dilation, higher value means larger dilation (and in turn more aggressive
+        correction.) Defaults to 3.
+        
+        method (str): Standard mask growth or sequential. Standard mask takes into account neighboring mask while
+        growing mask, while sequential doesn't. Deafaults to Standard.
+        
+        num_neighbors: Required for Standard growth and defaults to 30. Determines the number of neighbors to 
+        take into account while creating connectivty graph fora mask in Standard growth.   
+        
+        use_actual_overlap_for_reinforcement: True or False; False by default. Specifies whether to use actual overlap
+            or whole boundary signals for reinforcement. Note that the paper approximates that the whole boundary area is 
+            overlapping with neighboring cells.
+            
+        alpha:float b/w [0,1]; Defualts to 1. Specifies extent of reinforcement. A higher value results into higher fraction 
+            of cell boundary signal being used for reinforcing the signal. Note that paper assumes alpha to be 1 (i.e, uses
+            signals on all boundary area for reinforcement.)
 
     References:
         Bai Y, Zhu B, Rovira-Clave X, Chen H, Markovic M, Chan CN, Su T-H, McIlwain DR, Estes JD,
         Keren L, Nolan GP and Jiang S (2021) Adjacent Cell Marker Lateral Spillover Compensation and Reinforcement
         for Multiplexed Images. Front. Immunol. 12:652631. doi: 10.3389/fimmu.2021.652631
     """
-    def __init__(self, segmentation_mask=None, element_size=2, element_shape="diamond"):
+    def __init__(self, segmentation_mask=None, element_size=2, element_shape="diamond",
+                growth = 3, method = 'Standard', num_neighbors = 30, use_actual_overlap_for_reinforcement = False, alpha = 1):
+        
+        
         if element_shape == "diamond":
             self.structuring_element = skimage.morphology.diamond(element_size)
         elif element_shape == "square":
@@ -58,8 +89,17 @@ class REDSEAQuantifyMIF(Transform):
         assert self.structuring_element.shape[0] % 2 == 1, \
             f"invalid structuring element shape: {self.structuring_element.shape}. Must have odd dimensions so that" \
             f"element can be centered on a single pixel."
+        
+        
         self.element_size = int((self.structuring_element.shape[0] - 1) / 2)
         self.segmentation_mask = segmentation_mask
+        
+        self.growth = growth
+        self.method = method
+        self.num_neighbors = num_neighbors
+        self.use_actual_overlap_for_reinforcement = use_actual_overlap_for_reinforcement
+        self.alpha = alpha
+        
 
     def F(self, img, segmentation, coords_offset=(0, 0)):
         """
@@ -83,9 +123,17 @@ class REDSEAQuantifyMIF(Transform):
             f"segmentation of shape {segmentation.shape} does not match image of shape {img.shape}. " \
             f"Must be of shapes (i, j) and (i, j, n_channels), respectively."
 
-        segmentation_zero_boundary = self.get_segmentation_zero_boundary(segmentation.copy())
+#         segmentation_zero_boundary = self.get_segmentation_zero_boundary(segmentation.copy())
+        
+        assert not np.isinf(tile.image).any(), "There are np.inf values in the array. If this is\
+        is due to numeric overflow, you can fix it by removing np.inf by max of the array (max excluding inf.)"
+        assert not np.isnan(tile.image).any(), "Array contains NaN value(s)."
 
-        counts_redsea = self.compute_redsea_counts_matrix(img=img, mask=segmentation_zero_boundary)
+        mask_reindexed, mask_counts = REDSEAQuantifyMIF.split_cells(segmentation.copy())
+     
+        mask_dilated = REDSEAQuantifyMIF.grow_masks(mask_reindexed, self.growth, self.method, self.num_neighbors)
+
+        counts_redsea, counts_uncomp = self.compute_redsea_counts_matrix(img=img, mask=mask_dilated)
 
         ### this part copied from QuantifyMIF
         countsdataframe = regionprops_table(
@@ -135,9 +183,102 @@ class REDSEAQuantifyMIF(Transform):
             segmentation = tile.masks[self.segmentation_mask].copy(),
             coords_offset = tile.coords,
         )
+        
+        
+    def compute_redsea_counts_matrix(self, img, mask):
+        """
+        Computes counts matrix using REDSEA algorithm
+
+        Args:
+            img (np.ndarray): (h, w, n_channels) Input image
+            mask (np.ndarray): (h, w) segmentation mask. Zeros are background, and pixels belonging to each of n cells
+                are labelled with integers, with a line of zeros separating adjacent regions.
+                Labels will be relabeled from 1 to n.
+            use_actual_overlap_for_reinforcement: True or False; False by default. Specifies whether to use actual overlap
+            or whole boundary signals for reinforcement. Note that the paper approximates that the whole boundary area is 
+            overlapping with neighboring cells.
+            alpha:float b/w [0,1]; Defualts to 1. Specifies extent of reinforcement. A higher value results into higher fraction 
+            of cell boundary signal being used for reinforcing the signal. Note that paper assumes alpha to be 1 (i.e, uses
+            signals on all boundary area for reinforcement.)
+        Returns:
+            np.ndarray: counts_redsea matrix (n_cells, n_channels), the corrected signals
+            np.ndarray: counts matrix (n_cells, n_channels), the uncorrected/original signals
+        """
+        # make sure that labels are 1:n
+        # this is relied upon later, when NxN matrix is indexed using cell labels
+        mask, _, _ = relabel_sequential(mask)
+
+        labels = np.unique(mask)
+        # remove zero label (background pixels)
+        labels = [item for item in labels if item != 0]
+        n_cells = len(labels)
+        # check to make sure that labels are consecutive
+        assert n_cells == np.max(mask), "labels must be consecutive ints from 1:n"
+
+        n_channels = img.shape[2]
+
+        # get border mask
+        mask_border = REDSEAQuantifyMIF._mask_to_border_mask(
+            mask,
+            structuring_element = self.structuring_element,
+            element_size = self.element_size
+        )
+
+        # get cell-cell interaction matrix
+        cell_adjecencies, cell_perimeters = REDSEAQuantifyMIF._compute_pairwise_matrix(mask, 
+                                                                          structuring_element=self.structuring_element)
+        cell_pair_weights = cell_adjecencies/cell_perimeters
+        
+
+        counts = np.empty((n_cells, n_channels))
+        counts_border = np.empty((n_cells, n_channels))
+        cell_sizes = np.empty(n_cells)
+
+        # fill counts matrix and border counts matrix, and cell size
+        for label in labels:
+            counts_lab = img[mask == label].sum(axis = 0)
+            counts_border_lab = img[mask_border == label].sum(axis = 0)
+
+            cell_sizes[label - 1] = np.sum(mask == label)
+            counts[label - 1, :] = counts_lab
+            counts_border[label - 1, :] = counts_border_lab
+
+        # computes the weighted sum of border counts, to be subtracted
+        if self.use_actual_overlap_for_reinforcement:
+            # If reinforcing signal based on actual overlap of boundary area
+            print("Using exact overlap for reinforcement and subtraction of spillover signal")
+            cell_pair_weights_self = cell_adjecencies.sum(axis=1)/cell_perimeters 
+            
+        # Note that equation 5 in redsea paper is an approximation. The overlapping reagions of the cell won't sum to its 
+        # perimeter. # Nonetheless, using only overlapping reason for reinforcement (count_border variable below) results
+        # in very little spillover correction. So, we implement the algorithm here as it is in paper, but with a hyperparamter
+        # that can let you specify extent of border signals you want to reinforce with. We call this parameter alpha.
+        # We also provide an option to get the actual overlap of the cell.
+        
+            counts_border = cell_pair_weights_self.reshape((-1, 1)) * counts_border
+        else:
+            # If using the approximation of the paper (equation 5)
+            counts_border = counts_border
+            
+        counts_subtract = cell_pair_weights @ counts_border
+
+        # now apply reinforcement and subtraction
+        counts_redsea = counts + self.alpha*counts_border - counts_subtract
+
+        # normalize by cell area
+        counts_redsea = np.diag([1 / cell_size for cell_size in cell_sizes]) @ counts_redsea
+        counts = np.diag([1 / cell_size for cell_size in cell_sizes]) @ counts
+
+        # clip negative values to 0
+        counts_redsea = counts_redsea.clip(0)
+
+        return counts_redsea, counts
+
+    
 
     @staticmethod
     def _mask_to_border_mask(mask, structuring_element, element_size):
+        
         """
         Converts a mask to a border-only mask.
         Loops through all pixels in the input mask, applies structuring element to get adjacent pixels, and
@@ -155,6 +296,7 @@ class REDSEAQuantifyMIF(Transform):
         Returns:
             np.ndarray: Segmentation mask of same shape as input, with zeros for non-boundary pixels
         """
+        
         assert mask.ndim == 2, f"input mask has shape {mask.shape} but must be (h, w)"
 
         border_mask = np.copy(mask)
@@ -169,9 +311,10 @@ class REDSEAQuantifyMIF(Transform):
                 # loop thru structuring element
                 border = False
                 for di, dj in zip(elem_loc_i, elem_loc_j):
-                    if 0 <= i + di <= mask.shape[0] - 1 and 0 <= j + dj <= mask.shape[0] - 1:
+                    if 0 <= i + di <= mask.shape[0] - 1 and 0 <= j + dj <= mask.shape[1] - 1:
                         if mask[i + di, j + dj] == 0:
                             # zero pixel means that it's a boundary pixel
+                            # bigger element size --> thicker boundary
                             border = True
                 if not border:
                     # in this case, no zero pixels were found, so it's not a border pixel
@@ -179,19 +322,22 @@ class REDSEAQuantifyMIF(Transform):
         return border_mask
 
     @staticmethod
-    def _compute_pairwise_matrix(mask):
+    def _compute_pairwise_matrix(mask, structuring_element):
         """
         Computes perimeters of each cell, and pairwise compensation values for each pair.
-        Uses a 3x3 structuring element.
+        Uses a structuring element.
         Note that labels are counted starting at 1, but array is indexed starting at 0
 
         Args:
             mask (np.ndarray): (h, w) segmentation mask. Zeros are background, and pixels belonging to each of n
                 cells are labelled with integers 1 to n, with a line of zeros separating adjacent regions.
+            structuring_element
 
         Returns:
             np.ndarray: (n_cells, n_cells) array where the i,jth element gives b_ij / P_j, i.e. the number of boundary pixels
                 between cells i and j divided by the total perimeter of cell j.
+            np.ndarray: (m_cells, ) array where i_th element contains the perimeter corresponding to the cell i (actually i+1)
+            since cell label start at 1, while array indices start at 0.
         """
         labels = np.unique(mask)
         # remove zero label (background pixels)
@@ -209,21 +355,26 @@ class REDSEAQuantifyMIF(Transform):
         cell_perimeters = np.zeros(n_cells)
         cell_adjacencies = np.zeros((n_cells, n_cells))  # cell-cell shared perimeter matrix container
 
-        # loop thru zero pixels
         zero_ind_i, zero_ind_j = np.where(mask == 0)
+        
+        # loop thru zero pixels
         for i, j in zip(zero_ind_i, zero_ind_j):
             # offsets for a 3x3 structuring element centered on i,j
             adj_labels = []
-            for di, dj in itertools.product([-1, 0, 1], repeat = 2):
-                if 0 <= i + di <= mask.shape[0] - 1 and 0 <= j + dj <= mask.shape[0] - 1:
+#             for di, dj in itertools.product([-1, 0, 1], repeat = 2):
+            elem_loc = np.where(structuring_element == 1)
+        # offset so that the location indices are centered on the structuring element
+            elem_loc_i, elem_loc_j = [c - structuring_element.shape[0]//2+1 for c in elem_loc]
+            for di, dj in zip(elem_loc_i, elem_loc_j):
+                if 0 <= i + di <= mask.shape[0] - 1 and 0 <= j + dj <= mask.shape[1] - 1:
                     label = mask[i + di, j + dj]
                     if label != 0 and label not in adj_labels:
                         adj_labels.append(label)
-
+                        
             # increment perimeter counts
             # need to subtract 1 because labels start at 1 but index starts at 0
             for label in adj_labels:
-                cell_perimeters[label - 1] += 1
+                cell_perimeters[int(label) - 1] += 1
 
             # increment shared perimeter counts
             # need to subtract 1 because labels start at 1 but index starts at 0
@@ -236,72 +387,191 @@ class REDSEAQuantifyMIF(Transform):
             raise ValueError("Cell perimeters in _compute_pairwise_matrix() contains zeros!!")
 
         # divide to get fraction
-        cell_adjacencies = cell_adjacencies / cell_perimeters
+#         cell_adjacencies = cell_adjacencies / cell_perimeters
 
-        return cell_adjacencies
+        return cell_adjacencies, cell_perimeters
 
-    def compute_redsea_counts_matrix(self, img, mask):
+    
+    
+    
+
+    
+    @staticmethod
+    def split_cells(mask):
+        '''
+        Takes a masked tile and adds a pixel of space between each cell
+        Returns: Relabeled mask with no duplicate labels and total number of mask counts 
+        '''
+        rob_filtered = roberts(mask)>0
+        contours = binary_dilation(rob_filtered)
+        sep = (mask>0) & ~rob_filtered #subtract edge to separate cells prior to ndi.label
+        lab,num_labs = label(sep, output = int)
+        return lab, num_labs
+  
+
+
+    @staticmethod
+    def compute_centroids(mask):
+    
         """
-        Computes counts matrix using REDSEA algorithm
-
-        Args:
-            img (np.ndarray): (h, w, n_channels) Input image
-            mask (np.ndarray): (h, w) segmentation mask. Zeros are background, and pixels belonging to each of n cells
-                are labelled with integers, with a line of zeros separating adjacent regions.
-                Labels will be relabeled from 1 to n.
-
-        Returns:
-            np.ndarray: counts matrix (n_cells, n_channels)
+        The compute_centroids utility function takes a mask image as input (in the form of a 2D NumPy array)
+        and computes and returns the centroids of the individual mask labels in the mask image. 
         """
-        # make sure that labels are 1:n
-        # this is relied upon later, when NxN matrix is indexed using cell labels
-        mask, _, _ = relabel_sequential(mask)
+        
+        num_masks = len(np.unique(mask)) - 1
+        indices = np.where(mask != 0)
+        values = mask[indices[0], indices[1]]
 
-        labels = np.unique(mask)
-        # remove zero label (background pixels)
-        labels = [item for item in labels if item != 0]
-        n_cells = len(labels)
-        # check to make sure that labels are consecutive
-        assert n_cells == np.max(mask), "labels must be consecutive ints from 1:n"
+        maskframe = pd.DataFrame(np.transpose(np.array([indices[0], indices[1],
+                                                        values]))).rename(columns = {0:"x", 1:"y", 2:"id"})
+        centroids = maskframe.groupby('id').agg({'x': 'mean', 'y': 'mean'}).to_numpy()
+        
+        return centroids
 
-        n_channels = img.shape[2]
+     
+        
+    @staticmethod
+    def remove_overlaps_nearest_neighbors(mask, centroids):
+        """
+        
+        This utility functuon maps an overlapping mask region to nearest mask based
+        on distance from the centriods of overlapping mask labels.
+        """
+        final_masks = np.max(mask, axis = 2)
+       
+        collisions = np.nonzero(np.sum(mask > 0, axis = 2) > 1)
+        collision_masks = mask[collisions]
+        collision_index = np.nonzero(collision_masks)
+        collision_masks = collision_masks[collision_index]
+        collision_frame = pd.DataFrame(np.transpose(np.array([collision_index[0],collision_masks]))
+                                      ).rename(columns = {0:"collis_idx", 1:"mask_id"})
+        
+        grouped_frame = collision_frame.groupby('collis_idx')
+        for collis_idx, group in grouped_frame:
+            collis_pos = np.expand_dims(np.array(
+                [collisions[0][collis_idx], collisions[1][collis_idx]]), axis = 0)
+            
+            prevval = final_masks[collis_pos[0,0], collis_pos[0,1]]
+            mask_ids = list(group['mask_id'])
+            curr_centroids = np.array([centroids[mask_id - 1] for mask_id in mask_ids])
+            dists = cdist(curr_centroids, collis_pos)
+            closest_mask = mask_ids[np.argmin(dists)]
+            final_masks[collis_pos[0,0], collis_pos[0,1]] = closest_mask
+        
+        return final_masks
+    
+    
+    @staticmethod
+    def compute_boundbox(mask):
+        """
+        computes the minimum and maximum (x, y)
+        coordinates of the bounding boxes for each connected component (mask label) in the mask.
+        """
+    
+        num_masks = len(np.unique(mask)) - 1
+        indices = np.where(mask != 0)
+        values = mask[indices[0], indices[1]]
 
-        # get border mask
-        mask_border = self._mask_to_border_mask(
-            mask,
-            structuring_element = self.structuring_element,
-            element_size = self.element_size
-        )
+        maskframe = pd.DataFrame(np.transpose(np.array([indices[0], indices[1],
+                                                        values]))).rename(columns = {0:"y", 1:"x", 2:"id"})
+        bb_mins = maskframe.groupby('id').agg({'y': 'min', 'x': 'min'}).to_records(index = False).tolist()
+        bb_maxes = maskframe.groupby('id').agg({'y': 'max', 'x': 'max'}).to_records(index = False).tolist()
+        return bb_mins, bb_maxes
+    
+    
+    
+    @staticmethod
+    def grow_masks(masks, growth, method = 'Standard', num_neighbors = 30):
 
-        # get cell-cell interaction matrix
-        cell_pair_weights = self._compute_pairwise_matrix(mask)
+        """
+        utility function for expanding masks by applying dilation, 
+        using either a standard method based on the centroids of the masks,
+        or a sequential method based on expanding each mask individually.
+        growth controls amount of dilation to be applied to the masks. 
+        num_neighbors is used for Standard method and determines number of 
+        nearest neighbors to consider when creating connectivity graph in
+        the Standard method.
 
-        counts = np.empty((n_cells, n_channels))
-        counts_border = np.empty((n_cells, n_channels))
-        cell_sizes = np.empty(n_cells)
+        This function returns the dilated mask.
+        """
+        assert method in ['Standard', 'Sequential']
 
-        # fill counts matrix and border counts matrix, and cell size
-        for label in labels:
-            counts_lab = img[mask == label].sum(axis = 0)
-            counts_border_lab = img[mask_border == label].sum(axis = 0)
 
-            cell_sizes[label - 1] = np.sum(mask == label)
-            counts[label - 1, :] = counts_lab
-            counts_border[label - 1, :] = counts_border_lab
+        num_masks = len(np.unique(masks)) - 1
 
-        # computes the weighted sum of border counts, to be subtracted
-        counts_subtract = cell_pair_weights @ counts_border
+        if method == 'Standard':
+            print("Standard growth selected")
 
-        # now apply reinforcement and subtraction
-        counts_redsea = counts + counts_border - counts_subtract
 
-        # normalize by cell area
-        counts_redsea = np.diag([1 / cell_size for cell_size in cell_sizes]) @ counts_redsea
+            cent_array = REDSEAQuantifyMIF.compute_centroids(masks)
+            connectivity_matrix = kneighbors_graph(cent_array, num_neighbors).toarray() * np.arange(1, num_masks + 1)
+            connectivity_matrix = connectivity_matrix.astype(int)
+            labels = {}
+            for n in range(num_masks):
+                connections = list(connectivity_matrix[n, :])
+                connections.remove(0)
+                layers_used = [labels[i] for i in connections if i in labels]
+                layers_used.sort()
+                currlayer = 0
+                for layer in layers_used:
+                    if currlayer != layer: 
+                        break
+                    currlayer += 1
+                labels[n + 1] = currlayer
 
-        # clip negative values to 0
-        counts_redsea = counts_redsea.clip(0)
+            possible_layers = len(list(set(labels.values())))
+            label_frame = pd.DataFrame(list(labels.items()), columns = ["maskid", "layer"])
+            image_h, image_w = masks.shape
+            expanded_masks = np.zeros((image_h, image_w, possible_layers), dtype = int)
 
-        return counts_redsea
+            grouped_frame = label_frame.groupby('layer')
+            for layer, group in grouped_frame:
+                currids = list(group['maskid'])
+                masklocs = np.isin(masks, currids)
+                expanded_masks[masklocs, layer] = masks[masklocs]
+
+            dilation_mask = disk(1)
+            grown_masks = np.copy(expanded_masks)
+            for _ in range(growth):
+                for i in range(possible_layers):
+                    grown_masks[:, :, i] = dilation(grown_masks[:, :, i], dilation_mask)
+            return REDSEAQuantifyMIF.remove_overlaps_nearest_neighbors(grown_masks,cent_array)
+
+        elif method == 'Sequential':
+            print("Sequential growth selected")
+            Y, X = masks.shape
+            bb_mins, bb_maxes = REDSEAQuantifyMIF.compute_boundbox(masks)
+            struc = disk(1)
+            for _ in range(growth):
+                for i in range(num_masks):
+                    mins = bb_mins[i]
+                    maxes = bb_maxes[i]
+                    minY, minX,= mins[0] - 3*growth, mins[1] - 3*growth,
+                    maxY, maxX  = maxes[0] + 3*growth, maxes[1] + 3*growth
+                    if minX < 0: minX = 0
+                    if minY < 0: minY = 0
+                    if maxX >= X: maxX = X - 1
+                    if maxY >= Y: maxY = Y - 1
+
+                    currreg = masks[minY:maxY, minX:maxX]
+                    mask_snippet = (currreg == i + 1)
+                    full_snippet = currreg > 0
+                    other_masks_snippet = full_snippet ^ mask_snippet
+                    dilated_mask = binary_dilation(mask_snippet, struc)
+                    final_update = (dilated_mask ^ full_snippet) ^ other_masks_snippet
+
+
+                    pix_to_update = np.nonzero(final_update)
+
+                    pix_X = np.array([min(j + minX, X) for j in pix_to_update[1]])
+                    pix_Y = np.array([min(j + minY, Y) for j in pix_to_update[0]])
+
+                    masks[pix_Y, pix_X] = i + 1
+
+            return masks
+
+    
+    
 
     @staticmethod
     def get_segmentation_zero_boundary(segmentation):
@@ -328,6 +598,7 @@ class REDSEAQuantifyMIF(Transform):
         return segmentation
 
 
+    
 class FilterEdgeCells(pathml.preprocessing.transforms.Transform):
     """
     Filter out cells from counts matrix which are within certain number of px from edge of tile.
